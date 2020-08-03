@@ -41,6 +41,7 @@ type QQClient struct {
 
 	decoders map[string]func(*QQClient, uint16, []byte) (interface{}, error)
 	handlers sync.Map
+	server   *net.TCPAddr
 
 	syncCookie       []byte
 	pubAccountCookie []byte
@@ -155,7 +156,7 @@ func (c *QQClient) Login() (*LoginResponse, error) {
 	if l.Success {
 		c.lastLostMsg = ""
 		c.registerClient()
-		go c.heartbeat()
+		c.startHeartbeat()
 		_, _ = c.sendAndWait(c.buildGetMessageRequestPacket(msg.SyncFlag_START, time.Now().Unix()))
 	}
 	return &l, nil
@@ -171,7 +172,7 @@ func (c *QQClient) SubmitCaptcha(result string, sign []byte) (*LoginResponse, er
 	l := rsp.(LoginResponse)
 	if l.Success {
 		c.registerClient()
-		go c.heartbeat()
+		c.startHeartbeat()
 	}
 	return &l, nil
 }
@@ -606,8 +607,21 @@ func (g *GroupInfo) removeMember(uin int64) {
 	}
 }
 
+var servers = []*net.TCPAddr{
+	{IP: net.IP{42, 81, 169, 46}, Port: 8080},
+	{IP: net.IP{42, 81, 172, 81}, Port: 80},
+	{IP: net.IP{114, 221, 148, 59}, Port: 14000},
+	{IP: net.IP{42, 81, 172, 147}, Port: 443},
+	{IP: net.IP{125, 94, 60, 146}, Port: 80},
+	{IP: net.IP{114, 221, 144, 215}, Port: 80},
+	{IP: net.IP{42, 81, 172, 22}, Port: 80},
+}
+
 func (c *QQClient) connect() error {
-	conn, err := net.Dial("tcp", "125.94.60.146:80") //TODO: more servers
+	if c.server == nil {
+		c.server = servers[rand.Intn(len(servers))]
+	}
+	conn, err := net.DialTCP("tcp", nil, c.server)
 	if err != nil {
 		return err
 	}
@@ -687,6 +701,7 @@ func (c *QQClient) sendAndWait(seq uint16, pkt []byte) (interface{}, error) {
 		return rsp.Response, rsp.Error
 	case <-time.After(time.Second * 15):
 		c.handlers.Delete(seq)
+		println("Packet Timed out")
 		return nil, errors.New("time out")
 	}
 }
@@ -758,12 +773,16 @@ func (c *QQClient) loop() {
 	c.dispatchDisconnectEvent(&ClientDisconnectedEvent{Message: c.lastLostMsg})
 }
 
-func (c *QQClient) heartbeat() {
-	for c.Online {
-		time.Sleep(time.Second * 30)
+func (c *QQClient) startHeartbeat() {
+	time.AfterFunc(30*time.Second, c.doHeartbeat)
+}
+
+func (c *QQClient) doHeartbeat() {
+	if c.Online {
 		seq := c.nextSeq()
 		sso := packets.BuildSsoPacket(seq, "Heartbeat.Alive", SystemDeviceInfo.IMEI, []byte{}, c.OutGoingPacketSessionId, []byte{}, c.ksid)
 		packet := packets.BuildLoginPacket(c.Uin, 0, []byte{}, sso, []byte{})
 		_, _ = c.sendAndWait(seq, packet)
+		time.AfterFunc(30*time.Second, c.doHeartbeat)
 	}
 }
